@@ -201,12 +201,18 @@ class StableDiffusion(nn.Module):
         
         # Initialize losses
         losses = {}
+        #TODO: Different guidance scales for each type...if mixing them is useful...
+                
+
+        # interp to 512x512 to be fed into vae
+        pred_rgb_512 = F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False).to(self.device)
+        target_image = F.interpolate(target_image.unsqueeze(0), (512, 512), mode='bilinear', align_corners=False).to(self.device)
         
         # Calculate SSIM loss if target image provided
         if target_image is not None:
             from source.msssim import MSSSIM
             msssim = MSSSIM()
-            losses['ssim'] = 1 - msssim(pred_rgb_512.unsqueeze(0), target_image.unsqueeze(0))
+            losses['ssim'] = 1 - msssim(pred_rgb_512, target_image)
             
             # Frequency separation loss
             pred_low = F.avg_pool2d(pred_rgb_512, kernel_size=4)
@@ -230,12 +236,10 @@ class StableDiffusion(nn.Module):
                          mask_consistency_weight * losses.get('mask_consistency', 0))
             
             # Backpropagate total loss
-            pred_rgb_512.backward(gradient=w * total_loss, retain_graph=True)
+            total_loss.backward(retain_graph=True)
         
         # This method is responsible for generating the dream-loss gradients.
         
-        # interp to 512x512 to be fed into vae
-        pred_rgb_512 = F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False)
 
         if t is None:
             t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
@@ -266,9 +270,6 @@ class StableDiffusion(nn.Module):
                 image_pred = self.decode_latents(latent_pred)
 
                 
-        #TODO: Different guidance scales for each type...if mixing them is useful...
-                
-        w = (1 - self.alphas[t])
             
         # perform noise guidance (high scale from paper!)
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -290,6 +291,8 @@ class StableDiffusion(nn.Module):
             image_pred = image_pred_uncond + guidance_scale * (image_pred_text - image_pred_uncond)
             image_delta=image_pred - pred_rgb_512
             pred_rgb_512.backward(gradient = w * image_delta * image_coef, retain_graph=True)
+
+        w = (1 - self.alphas[t])
 
 
         # w(t), sigma_t^2
