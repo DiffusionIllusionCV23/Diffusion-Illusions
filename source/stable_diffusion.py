@@ -18,6 +18,8 @@ from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_pndm import PNDMScheduler
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
+from source.STFT import STFT
+from source.msssim import MSSSIM
 from PIL import Image
 
 import torch
@@ -80,10 +82,6 @@ class StableDiffusion(nn.Module):
         self.scheduler    = pipe.scheduler                    ; #assert isinstance(self.scheduler    , PNDMScheduler       ),type(self.scheduler    )
         
         self.uncond_text=''
-
-        # Initialize CLIP image encoder
-        self.image_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
-        self.image_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
         self.checkpoint_path=checkpoint_path
             
@@ -194,32 +192,34 @@ class StableDiffusion(nn.Module):
             target_image: Optional target image for perceptual losses
         """
         # Loss weights
-        ssim_weight = 0.4
-        low_freq_weight = 0.3
+        ssim_weight = 0
+        low_freq_weight = 0.5
         high_freq_weight = 0.2
         mask_consistency_weight = 0.1
         
         # Initialize losses
-        losses = {}
-        #TODO: Different guidance scales for each type...if mixing them is useful...
-                
+        losses = {}                
 
         # interp to 512x512 to be fed into vae
         pred_rgb_512 = F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False).to(self.device)
         target_image = F.interpolate(target_image.unsqueeze(0), (512, 512), mode='bilinear', align_corners=False).to(self.device)
-        
         # Calculate SSIM loss if target image provided
         if target_image is not None:
-            from source.msssim import MSSSIM
-            msssim = MSSSIM()
-            losses['ssim'] = 1 - msssim(pred_rgb_512, target_image)
-            
+
+            mssim = MSSSIM()
+            losses['ssim'] = 1  - mssim(pred_rgb_512, target_image)            
             # Frequency separation loss
             pred_low = F.avg_pool2d(pred_rgb_512, kernel_size=4)
             target_low = F.avg_pool2d(target_image, kernel_size=4)
             pred_high = pred_rgb_512 - F.interpolate(pred_low, scale_factor=4, mode='bilinear')
             target_high = target_image - F.interpolate(target_low, scale_factor=4, mode='bilinear')
+            pred_low = F.interpolate(pred_low, scale_factor=4, mode='bilinear')
+            target_low = F.interpolate(target_low, scale_factor=4, mode='bilinear')
             
+            # SSIM loss
+
+            image_delta = (pred_low - target_low) * low_freq_weight
+            image_delta += (pred_high - target_high) * high_freq_weight
             losses['low_freq'] = F.mse_loss(pred_low, target_low)
             losses['high_freq'] = F.mse_loss(pred_high, target_high)
             
@@ -228,6 +228,7 @@ class StableDiffusion(nn.Module):
                 masked_pred = pred_rgb_512 * mask
                 masked_target = target_image * mask
                 losses['mask_consistency'] = F.mse_loss(masked_pred, masked_target)
+                image_delta += (masked_pred - masked_target) * mask_consistency_weight
             
             # Apply loss weights
             total_loss = (ssim_weight * losses['ssim'] +
@@ -236,11 +237,17 @@ class StableDiffusion(nn.Module):
                          mask_consistency_weight * losses.get('mask_consistency', 0))
             
             # Backpropagate total loss
-            total_loss.backward(retain_graph=True)
-        
+            pred_rgb_512.backward(gradient = image_delta * 1e-2, retain_graph=True)
+        '''
+        pred_rgb_256 = F.interpolate(pred_rgb, (256, 256), mode='bilinear', align_corners=False).to(self.device)
+        target_image = F.interpolate(target_image, (256, 256), mode='bilinear', align_corners=False).to(self.device)
+        stft = STFT(n_fft=16, hop_length=1, win_length=3)
+        predict_stft = stft(pred_rgb_256)
+        target_stft = stft(target_image)
+        loss = F.mse_loss(predict_stft,target_stft) * 10
+        loss.backward(retain_graph=True)
+        '''
         # This method is responsible for generating the dream-loss gradients.
-        
-
         if t is None:
             t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=self.device)
 
@@ -291,7 +298,7 @@ class StableDiffusion(nn.Module):
             image_pred = image_pred_uncond + guidance_scale * (image_pred_text - image_pred_uncond)
             image_delta=image_pred - pred_rgb_512
             pred_rgb_512.backward(gradient = w * image_delta * image_coef, retain_graph=True)
-
+        
         w = (1 - self.alphas[t])
 
 
