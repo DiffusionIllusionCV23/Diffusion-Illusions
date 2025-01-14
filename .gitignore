@@ -21,3 +21,5 @@ datasets/RefMatte_RW_100.zip
 images/quad_overlays
 images
 stable-diffusion-v1-4
+clip-vit-base-patch32
+AVA

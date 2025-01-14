@@ -195,15 +195,18 @@ class StableDiffusion(nn.Module):
         ssim_weight = 0
         low_freq_weight = 0.5
         high_freq_weight = 0.2
-        mask_consistency_weight = 0.1
+        mask_consistency_weight = 0.5
         
         # Initialize losses
         losses = {}                
 
         # interp to 512x512 to be fed into vae
         pred_rgb_512 = F.interpolate(pred_rgb, (512, 512), mode='bilinear', align_corners=False).to(self.device)
-        target_image = F.interpolate(target_image.unsqueeze(0), (512, 512), mode='bilinear', align_corners=False).to(self.device)
+        if target_image is not None:
+            target_image = F.interpolate(target_image.unsqueeze(0), (512, 512), mode='bilinear', align_corners=False).to(self.device)
         # Calculate SSIM loss if target image provided
+        if mask is not None:
+            mask = F.interpolate(mask, (512, 512), mode='bilinear', align_corners=False).to(self.device)
         if target_image is not None:
 
             mssim = MSSSIM()
@@ -225,10 +228,12 @@ class StableDiffusion(nn.Module):
             
             # Mask consistency loss
             if mask is not None:
+                assert mask.shape == pred_rgb_512.shape
                 masked_pred = pred_rgb_512 * mask
                 masked_target = target_image * mask
                 losses['mask_consistency'] = F.mse_loss(masked_pred, masked_target)
                 image_delta += (masked_pred - masked_target) * mask_consistency_weight
+                image_delta *= mask
             
             # Apply loss weights
             total_loss = (ssim_weight * losses['ssim'] +
